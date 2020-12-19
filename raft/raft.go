@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"ximalaya.com/MIT-6.824-2018/src/labgob"
-	"ximalaya.com/MIT-6.824-2018/src/labrpc"
+	"github.com/evan-zxx/labgob"
+	"github.com/evan-zxx/labrpc"
 )
 
 //import "os"
