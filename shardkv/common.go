@@ -3,7 +3,7 @@ package shardkv
 import (
 	"strconv"
 
-	"ximalaya.com/MIT-6.824-2018/src/shardmaster"
+	"github.com/evan-zxx/consensus/shardmaster"
 )
 
 //

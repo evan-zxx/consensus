@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"ximalaya.com/MIT-6.824-2018/src/linearizability"
+	"github.com/evan-zxx/consensus/linearizability"
 )
 
 const linearizabilityCheckTimeout = 1 * time.Second

@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"ximalaya.com/MIT-6.824-2018/src/labrpc"
-	"ximalaya.com/MIT-6.824-2018/src/shardmaster"
+	"github.com/evan-zxx/consensus/labrpc"
+	"github.com/evan-zxx/consensus/shardmaster"
 
 	// import "log"
 	crand "crypto/rand"
@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"ximalaya.com/MIT-6.824-2018/src/raft"
+	"github.com/evan-zxx/consensus/raft"
 )
 
 func randstring(n int) string {

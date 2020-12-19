@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ximalaya.com/MIT-6.824-2018/src/labrpc"
-	"ximalaya.com/MIT-6.824-2018/src/shardmaster"
+	"github.com/evan-zxx/consensus/labrpc"
+	"github.com/evan-zxx/consensus/shardmaster"
 )
 
 //import "log"

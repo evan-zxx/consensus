@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"ximalaya.com/MIT-6.824-2018/src/labgob"
-	"ximalaya.com/MIT-6.824-2018/src/labrpc"
-	"ximalaya.com/MIT-6.824-2018/src/raft"
-	"ximalaya.com/MIT-6.824-2018/src/shardmaster"
+	"github.com/evan-zxx/consensus/labgob"
+	"github.com/evan-zxx/consensus/labrpc"
+	"github.com/evan-zxx/consensus/raft"
+	"github.com/evan-zxx/consensus/shardmaster"
 )
 
 type Op struct {

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"ximalaya.com/MIT-6.824-2018/src/linearizability"
+	"github.com/evan-zxx/consensus/linearizability"
 )
 
 // The tester generously allows solutions to complete elections in one second

@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"ximalaya.com/MIT-6.824-2018/src/labrpc"
+	"github.com/evan-zxx/consensus/labrpc"
 
 	// import "log"
 	crand "crypto/rand"

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/evan-zxx/labgob"
-	"github.com/evan-zxx/labrpc"
+	"github.com/evan-zxx/consensus/labgob"
+	"github.com/evan-zxx/consensus/labrpc"
 )
 
 //import "os"
