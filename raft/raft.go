@@ -12,6 +12,20 @@ import (
 	"github.com/evan-zxx/consensus/labrpc"
 )
 
+/*
+两个定时器:
+1. eletionTimer: 每个节点自身持有, 一旦超时, 即将自己角色变为candidate, term++, 发起新一轮的选举
+2. heartbeatTimers: leader节点持有, 一旦超时, 将发送心跳到各个follower(日志同步也是通过该定时器, 一旦有客户端发来的请求, 强制立刻超时该定时器, 触发日志同步)
+
+logEntry三个状态:
+1. insert: 客户端发起请求(kv: put key value), 此时直接将请求的log insert到logEntry的最后, 同时将heartbeatTimers置0, 立即触发日志复制流程.
+2. append()->commit: 日志复制流程中如果成功复制到半数服务, 则leader会在updateCommitIndex()更新自己的commitIndex,
+					 同时根据commitIndex会进行apply操作, 因为已经被commit的日志就是永久日志, leader如果还没apply,则直接进行apply
+			         leader apply之后会立即触发heartbeatTimers, 通知followers们也进行日志apply(follower通过rcp的LeaderCommit参数获知leader已经提交的日志, 进而更新自己的提交日志, 进而进行apply)
+3. apply: 前提是已经commit(过半数实例复制成功), apply可以适当delay, 因为已经commit的日志是永远不会再改变的, apply只是迟早的事情
+
+*/
+
 //import "os"
 //节点状态
 const Follower, Leader, Candidate int = 1, 2, 3
@@ -33,8 +47,8 @@ type ApplyMsg struct {
 
 //日志
 type LogEntry struct {
-	Term  int
-	Index int
+	Term  int // 插入日志时的leader term
+	Index int // 插入日志时的index
 	Log   interface{}
 }
 
@@ -59,22 +73,23 @@ type RequestVoteReply struct {
 	CurrentTerm int  // 当前任期 用于候选人去更新自己的任期
 }
 
-//日志复制请求
+//日志复制请求(leader发送到各个follower)
 type AppendEntries struct {
 	Me           int         // 自身服务器编号
 	Term         int         // 领导人的任期
 	PrevLogIndex int         // 新的日志条目(需要提交的)紧随之前的索引值
-	PrevLogTerm  int         // PrevLogIndex条目的任期值
+	PrevLogTerm  int         // PrevLogIndex条目的任期值(以此来保证日志连续)
 	Entries      []LogEntry  // 需要存储当前的日志条目(空表示心跳 一次发送多个为提高效率)
 	LeaderCommit int         // 领导人已经提交的日志索引值
 	Snapshot     LogSnapshot // 快照
+	// 该rcp中不需要传递leader的apply log状态, 因为follower会根据LeaderCommit字段更新自己的commit log, 进而触发自己的apply(提交的日志还未apply, 则apply)
 }
 
 //回复日志更新请求
-type RespEntries struct {
-	Term        int  // 当前任期值 用于领导人去更新自己
-	Successed   bool // 跟随者包含了匹配上PrevLogIndex & PrevLogTerm时为 真
-	LastApplied int
+type AppendEntriesResp struct {
+	Term        int  // 跟随者当时的任期值 用于领导人去更新自己(也有可能当时的跟随者已经成为了leader)
+	Successed   bool // 跟随者复制日志成功(包含了匹配上PrevLogIndex & PrevLogTerm时为真, 保证日志连续)
+	LastApplied int  // 跟随者最后应用的log
 }
 
 type Raft struct {
@@ -88,8 +103,8 @@ type Raft struct {
 	lastApplied     int                 // 当前状态机执行处: 最后应用到状态机的日志条目索引(真正apply到状态机)
 	status          int                 // 节点状态
 	currentTerm     int                 // 当前任期:服务器最后一次知道的任期号
-	heartbeatTimers []*time.Timer       // 心跳定时器
-	eletionTimer    *time.Timer         // 竞选超时定时器
+	heartbeatTimers []*time.Timer       // 心跳定时器(同时会由leader向各个follower进行日志复制)
+	eletionTimer    *time.Timer         // 竞选超时定时器(每个follower自身都会维护, 一旦超时就自身term++发起选举流程)
 	randtime        *rand.Rand          // 随机数，用于随机竞选周期，避免节点间竞争。
 
 	nextIndex      []int         // 记录每个follower的同步日志状态: 对于每一个服务器，需要发送给他的下一个日志条目的索引值（初始化为领导人最后索引值加一），leader有用
@@ -136,7 +151,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 //同步日志RPC
-func (rf *Raft) sendAppendEnteries(server int, req *AppendEntries, resp *RespEntries) bool {
+func (rf *Raft) sendAppendEnteries(server int, req *AppendEntries, resp *AppendEntriesResp) bool {
 	rstChan := make(chan bool)
 	ok := false
 	go func() {
@@ -361,7 +376,7 @@ func (rf *Raft) updateLog(start int, logEntrys []LogEntry, snapshot *LogSnapshot
 	rf.logs = rf.logs[:size]
 }
 
-//插入日志
+//插入日志 just for leader
 func (rf *Raft) insertLog(command interface{}) int {
 	rf.lock("Raft.insertLog")
 	defer rf.unlock("Raft.insertLog")
@@ -381,7 +396,7 @@ func (rf *Raft) insertLog(command interface{}) int {
 	return entry.Index
 }
 
-//更新当前已被提交日志索引
+//更新当前已被提交日志索引commit log index
 func (rf *Raft) updateCommitIndex() bool {
 	rst := false
 	var indexs []int
@@ -417,10 +432,12 @@ func (rf *Raft) apply() {
 	defer rf.unlock("Raft.apply")
 	// 如果是leader
 	if rf.status == Leader {
+		// 这里不care返回值 因为在设置返回这成功的同时, 也更新了commitLog
 		rf.updateCommitIndex()
 	}
 
 	lastapplied := rf.lastApplied
+	// 如果当前自身applied小于快照的index, 则直接应用状态机, 先追赶快照的index
 	if rf.lastApplied < rf.logSnapshot.Index {
 		msg := ApplyMsg{
 			CommandValid: false,
@@ -431,12 +448,15 @@ func (rf *Raft) apply() {
 		rf.lastApplied = rf.logSnapshot.Index
 		rf.println(rf.me, "apply snapshot :", rf.logSnapshot.Index, "with logs:", len(rf.logs))
 	}
+
+	// 自身当前最后接收到的日志
 	last := 0
 	if len(rf.logs) > 0 {
 		last = rf.logs[len(rf.logs)-1].Index
 	}
-	// 如果: 提交日志>应用日志 && 提交日志为新的日志 则 进行真正的应用状态机rf.lastApplied++
+	// 如果: 最后的应用日志 < 当前提交日志 && 最后的提交日志未新的日志 --> 则 进行真正的应用状态机rf.lastApplied++
 	for ; rf.lastApplied < rf.commitIndex && rf.lastApplied < last; rf.lastApplied++ {
+		//TODO: 这里为什么没有更新自己的rf.lastApplied??      更新了, 在rf.lastApplied++(for循环的条件里)
 		index := rf.lastApplied
 		// 应用状态机消息到外部系统(kvserver)
 		msg := ApplyMsg{
@@ -446,7 +466,7 @@ func (rf *Raft) apply() {
 		}
 		rf.applyCh <- msg
 	}
-	// 如果上面提交了新的log 打印日志..
+	// 如果上面提交了新的log apply  则打印日志..
 	if rf.lastApplied > lastapplied {
 		appliedIndex := rf.lastApplied - 1 - rf.logSnapshot.Index
 		endIndex, endTerm := 0, 0
@@ -546,13 +566,14 @@ func (rf *Raft) RequestVote(req *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.IsAgree = true
 	// 将自身当前的term放入回包中.
 	reply.CurrentTerm, _ = rf.GetState()
-	//竞选任期小于等于自身任期，则反对票
+	//竞选任期小于等于自身任期，则反对票(发出选举之前一定会先自增term的)
 	if reply.CurrentTerm >= req.ElectionTerm {
 		rf.println(rf.me, "refuse", req.Me, "because of term")
 		reply.IsAgree = false
 		return
 	}
-	//竞选任期大于自身任期，则更新自身任期，并转为follower
+	// 竞选任期大于自身任期，则更新自身任期，并转为follower
+	// 无论是否最终同意选票,都会将自己term更新到更大
 	rf.setStatus(Follower)
 	rf.setTerm(req.ElectionTerm)
 	logterm, logindex := rf.getLogTermAndIndex()
@@ -561,13 +582,16 @@ func (rf *Raft) RequestVote(req *RequestVoteArgs, reply *RequestVoteReply) {
 		// 自己的日志大于竞选者的日志
 		rf.println(rf.me, "refuse", req.Me, "because of logs's term")
 		reply.IsAgree = false
+
 		// 日志任期相同 继续比较index
 	} else if logterm == req.LogTerm {
+		// 如果自己的日志idx<=竞选着的idx, 任然同意该选票
 		reply.IsAgree = logindex <= req.LogIndex
 		if !reply.IsAgree {
 			rf.println(rf.me, "refuse", req.Me, "because of logs's index")
 		}
 	}
+
 	// logterm < req.LogTerm 自身最后的log term 小于候选者 也投统一票
 	if reply.IsAgree {
 		rf.println(rf.me, "agree", req.Me)
@@ -666,7 +690,7 @@ func (rf *Raft) ElectionLoop() {
 }
 
 // 接收&处理 日志复制请求
-func (rf *Raft) RequestAppendEntries(req *AppendEntries, resp *RespEntries) {
+func (rf *Raft) RequestAppendEntries(req *AppendEntries, resp *AppendEntriesResp) {
 	currentTerm, _ := rf.GetState()
 	resp.Term = currentTerm
 	resp.Successed = true
@@ -679,12 +703,13 @@ func (rf *Raft) RequestAppendEntries(req *AppendEntries, resp *RespEntries) {
 	if rf.isOldRequest(req) {
 		return
 	}
-	//否则更新自身任期，切换自生为fallow，重置选举定时器
+	//否则更新自身任期，切换自生为follow(一般情况本来就是follower)，重置选举定时器(因为受到了新的心跳)
 	rf.resetCandidateTimer()
 	rf.setTerm(req.Term)
 	rf.setStatus(Follower)
+	//获取自身当前最新的日志index
 	_, logindex := rf.getLogTermAndIndex()
-	//判定与leader日志是否一致
+	//判定与leader发送过来的prelog是否一致
 	if req.PrevLogIndex > 0 {
 		if req.PrevLogIndex > logindex {
 			//没有该日志，则拒绝更新(自身日志不连续)
@@ -701,7 +726,7 @@ func (rf *Raft) RequestAppendEntries(req *AppendEntries, resp *RespEntries) {
 			return
 		}
 	}
-	//更新日志
+	//更新日志/心跳
 	rf.setLastLog(req)
 	if len(req.Entries) > 0 || req.Snapshot.Index > 0 {
 		if len(req.Entries) > 0 {
@@ -712,7 +737,9 @@ func (rf *Raft) RequestAppendEntries(req *AppendEntries, resp *RespEntries) {
 	// 更新follower的commitIndex为leader的.
 	rf.setCommitIndex(req.LeaderCommit)
 	// 尝试应用状态机.
-	// 注意raft中没有明确的apply rpc, 而是通过复制日志(心跳)来在下一次的交互中使得leader/follower进行apply(如果条件为真)
+	// TODO: 注意raft中没有明确的apply rpc
+	// 而是leader先commit自己本地的日志, 然后立即触发心跳, 通过复制日志(心跳)来在下一次的交互中使得follower进行apply(如果条件为真)
+	// 即本次apply() 如果跟随者自己commit log有更新(从leader那里获知的), 则也会进行自己的apply
 	rf.apply()
 	rf.persist()
 
@@ -736,9 +763,10 @@ func (rf *Raft) replicateLogTo(peer int) bool {
 		}
 		// 构造出appendLog req/rsp
 		req := rf.getAppendEntries(peer)
-		resp := RespEntries{Term: 0}
-		// 执行rpc
+		resp := AppendEntriesResp{Term: 0}
+		// 同步调用rpc, 进行日志复制
 		rst := rf.sendAppendEnteries(peer, &req, &resp)
+		// rpc返回
 		currentTerm, isLeader = rf.GetState()
 		if rst && isLeader {
 			//如果某个节点任期大于自己，则更新任期，变成follower
@@ -780,11 +808,13 @@ func (rf *Raft) replicateLogNow() {
 }
 
 //心跳周期&复制日志loop
+//(leader收到客户端的请求, 会将请求insert到logEntry中, 并立立即replicateLogNow()重置定时器, 触发复制日志)
 func (rf *Raft) ReplicateLogLoop(peer int) {
 	defer func() {
 		rf.heartbeatTimers[peer].Stop()
 	}()
 	for !rf.isKilled {
+		//定时器到时触发
 		<-rf.heartbeatTimers[peer].C
 		if rf.isKilled {
 			break
@@ -793,14 +823,16 @@ func (rf *Raft) ReplicateLogLoop(peer int) {
 		rf.heartbeatTimers[peer].Reset(HeartbeatDuration)
 		rf.unlock("Raft.ReplicateLogLoop")
 		_, isLeader := rf.GetState()
-		// 如果是leader 就开始定时ping集群中的follower
+		// 如果是leader才会起实际作用 触发定时心跳ping集群中的follower/发送日志(接收到客户端的请求insert进的log)
 		if isLeader {
 			success := rf.replicateLogTo(peer)
 			//如果复制日志成功
 			//TODO: 不是需要复制给过半节点?
-			//这里不是真正的apply, 而是尝试性apply, 更新machIndex, 判断过半才真正的apply
+			//replicateLogTo()中已经更新machIndex
+			//这里不是真正的apply, 而是尝试性apply, 通过更新commitLog, 判断过半才真正的apply
 			if success {
 				rf.apply()
+				// apply之后立即触发下一次心跳, 因为有可能leader真正执行了apply, 需要立即通知follower们也进行apply
 				rf.replicateLogNow()
 				rf.persist()
 			}
@@ -809,7 +841,7 @@ func (rf *Raft) ReplicateLogLoop(peer int) {
 	rf.println(rf.me, "-", peer, "Exit ReplicateLogLoop")
 }
 
-//执行客户状态机(kvserver)命令
+//接收到客户状态机(kvserver)命令(只是leader将操作日志插入自己本地的LogEntry中)
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	index = 0
 	term, isLeader = rf.GetState()
@@ -817,6 +849,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		//设置term并插入log
 		index = rf.insertLog(command)
 		rf.println("leader", rf.me, ":", "start append log", term, "-", index)
+		// 立刻进行日志复制(leader同步日志到各个follower)
 		rf.replicateLogNow()
 	}
 	return
@@ -878,6 +911,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	//日志同步协程
 	for i := 0; i < len(rf.peers); i++ {
 		rf.heartbeatTimers[i] = time.NewTimer(HeartbeatDuration)
+		// 所有节点都创建该功能协程 但只有自身成为master后才真正起实际作用
 		go rf.ReplicateLogLoop(i)
 	}
 	rf.readPersist(persister.ReadRaftState())

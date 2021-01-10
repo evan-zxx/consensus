@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
-	"mapreduce"
 	"os"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/evan-zxx/consensus/mapreduce"
 )
 
 func mapF(filename string, contents string) []mapreduce.KeyValue {
@@ -36,9 +37,9 @@ func mapF(filename string, contents string) []mapreduce.KeyValue {
 	return rst
 }
 
-func reduceF(key string, values []string) string  {
+func reduceF(key string, values []string) string {
 	cnt := 0
-    //合并统计结果
+	//合并统计结果
 	for _, value := range values {
 		num, err := strconv.Atoi(value)
 		if err != nil {

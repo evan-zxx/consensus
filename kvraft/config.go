@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ximalaya.com/MIT-6.824-2018/src/raft"
+	"github.com/evan-zxx/consensus/raft"
 )
 
 func randstring(n int) string {

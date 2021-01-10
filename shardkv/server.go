@@ -120,7 +120,7 @@ func (kv *ShardKV) startConfig(config *shardmaster.Config) {
 	}
 }
 
-//判定重复请求
+//判断shard是否对应当前有效分片
 func (kv *ShardKV) isTrueGroup(shard int) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
