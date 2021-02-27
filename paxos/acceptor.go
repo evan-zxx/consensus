@@ -10,6 +10,8 @@ type acceptor struct {
 	id int
 	// the number of the proposal this server will accept, or 0 if it has never received a Prepare request
 	promiseNumber int
+
+	// 最终accept的n和value
 	// the number of the last proposal the server has accepted, or 0 if it never accepted any.
 	acceptedNumber int
 	// the value from the most recent proposal the server has accepted, or null if it has never accepted a proposal
@@ -32,12 +34,16 @@ func (a *acceptor) run() {
 		}
 		switch msg.tp {
 		case Prepare:
-			// 收到proposer的prepare包, 回复promise包
+			// 收到proposer的prepare, 回复promise
 			promise, ok := a.handlePrepare(msg)
 			if ok {
 				a.net.send(promise)
 			}
+			// 这里的实现..如果handlePrepare()返回false, 则不回复proposer消息, 让其自己等待超时
 		case Propose:
+			// 这里的propose和accept等价
+			// propose为proposer发来的accept
+			// accept是accpetor发给learner的
 			success := a.handleAccept(msg)
 			if success {
 				// 一旦accept成功 则通知learners, 而不是给proposer回包
@@ -71,6 +77,7 @@ func (a *acceptor) handlePrepare(args message) (message, bool) {
 	}
 	// 否则, 将自身promiseNumber更新为更大的
 	a.promiseNumber = args.number
+	// 回复promise
 	msg := message{
 		tp:   Promise,
 		from: a.id,

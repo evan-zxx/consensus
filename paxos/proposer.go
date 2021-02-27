@@ -14,7 +14,7 @@ type Entry struct {
 type proposer struct {
 	// server id
 	id int
-	// the largest round number the server has seen
+	// the largest round number the server has seen(n)
 	round int
 	// proposal number = (round number, serverID)
 	number int
@@ -36,6 +36,7 @@ func newProposer(id int, value string, net network, acceptors ...int) *proposer 
 func (p *proposer) run() {
 	var ok bool
 	var msg message
+	// 每次收到promise都会检查是否已经过半
 	// 直到过半的acceptor响应成功
 	for !p.majorityReached() {
 		if !ok {
@@ -66,6 +67,10 @@ func (p *proposer) run() {
 	for _, msg := range proposeMsg {
 		p.net.send(msg)
 	}
+
+	// 此处实现的是basic paxos算法, 相当于一个paxos instance
+	// 流程执行到此处已经确定了过半的value
+	// 所以run()流程直接结束..
 }
 
 // Phase 1. (a) A proposer selects a proposal number n
@@ -73,8 +78,10 @@ func (p *proposer) run() {
 func (p *proposer) prepare() []message {
 	p.round++
 	p.number = p.proposalNumber()
-	//msg := make([]message, p.majority())
-	msg := make([]message, p.acceptorCnt())
+	// 注意, 原论文中这里就只需要给quarum的节点发送prepare即可
+	// 因为升序的节点可以交给learner同步信息
+	msg := make([]message, p.majority())
+	//msg := make([]message, p.acceptorCnt())
 	i := 0
 
 	for to := range p.acceptors {
@@ -87,9 +94,10 @@ func (p *proposer) prepare() []message {
 		}
 		i++
 		// TODO: 第一阶段prepare 为什么只发给majority?  而不是所有的acceptor
-		//if i == p.majority() {
-		//	break
-		//}
+		// 同上, 因为只发送给quarums
+		if i == p.majority() {
+			break
+		}
 	}
 	return msg
 }
@@ -102,6 +110,7 @@ func (p *proposer) handlePromise(reply message) {
 	}
 	// 如果acceptor回复的acceptorNumber有值(曾经已经accept过值)
 	// TODO: 这里应该是判断reply.number>p.number吧?? 如果每个accept分开存就可以直接判断>0
+	// TODO: getPreAcceptEntry()做了最终的判断, 所以这里修改的p.number, p.value无所谓的.
 	//if reply.number > 0 {
 	//	acceptor.number = reply.number
 	//	acceptor.value = reply.value
@@ -119,8 +128,9 @@ func (p *proposer) handlePromise(reply message) {
 // for a proposal numbered n with a value v, where v is the value of the highest-numbered proposal
 // among the responses, or is any value if the responses reported no proposals.
 func (p *proposer) accept() []message {
-	//msg := make([]message, p.majority())
-	msg := make([]message, p.acceptorCnt())
+	// 注意这里依然是半数
+	msg := make([]message, p.majority())
+	//msg := make([]message, p.acceptorCnt())
 	i := 0
 	number, value := p.getPreAcceptEntry()
 	for to, acceptor := range p.acceptors {
@@ -145,10 +155,10 @@ func (p *proposer) accept() []message {
 func (p *proposer) majority() int {
 
 	// 超过半数即可进入下个流程.
-	//return len(p.acceptors)/2 + 1
+	return len(p.acceptors)/2 + 1
 
 	// 需要所有实例都success.
-	return len(p.acceptors)
+	// return len(p.acceptors)
 }
 
 func (p *proposer) majorityReached() bool {
@@ -176,6 +186,7 @@ func (p *proposer) acceptorCnt() int {
 func (p *proposer) getPreAcceptEntry() (int, string) {
 	number := p.number
 	value := p.value
+	// 选取acceptors中n最大的对应的value
 	for _, v := range p.acceptors {
 		if v.number > number {
 			number = v.number
