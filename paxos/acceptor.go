@@ -99,6 +99,8 @@ func (a *acceptor) handleAccept(args message) bool {
 	// handle accept依然比较promiseNumber
 	// 一旦accept, 就不会再改变, 因为accept的值一定是prepare中quarum都promised过的值
 	// 但是一旦accept, 就只会promised之前accept过的值
+	// 所以这里虽然依然会更新acceptedNumber & acceptedValue, 但其实还是之前的值
+
 	// 所以相互依赖, 最终收敛到"确定一个值"
 	if number >= a.promiseNumber {
 		a.acceptedNumber = number

@@ -163,7 +163,7 @@ func (kv *KVServer) updateSnapshot(index int, data []byte) {
 
 //raft状态机apply后的回调
 //注意: 每个server对应的raft实例的状态机apply后都会执行此回调
-//客户端在此回调中执行对应的get/put请求
+//状态机在此回调中执行对应的get/put请求
 func (kv *KVServer) onApply(applyMsg raft.ApplyMsg) {
 	if !applyMsg.CommandValid { //非状态机apply消息
 		//更新快照消息
