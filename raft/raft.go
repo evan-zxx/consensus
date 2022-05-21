@@ -334,7 +334,7 @@ func (rf *Raft) incNext(peer int) {
 	}
 }
 
-//设置fallow next日志索引
+//设置follow next日志索引
 func (rf *Raft) setNext(peer int, next int) {
 	rf.lock("Raft.setNext")
 	defer rf.unlock("Raft.setNext")
@@ -570,46 +570,10 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.logSnapshot.Datas = rf.persister.ReadSnapshot()
 }
 
-// 接收&处理 候选者发来的投票请求
-func (rf *Raft) RequestVote(req *RequestVoteArgs, reply *RequestVoteReply) {
-	reply.IsAgree = true
-	// 将自身当前的term放入回包中.
-	reply.CurrentTerm, _ = rf.GetState()
-	//竞选任期小于等于自身任期，则反对票(候选者发出选举之前一定会先自增term的)
-	if reply.CurrentTerm >= req.ElectionTerm {
-		rf.println(rf.me, "refuse", req.Me, "because of term")
-		reply.IsAgree = false
-		return
-	}
-	// 竞选任期大于自身任期，则更新自身任期，并转为follower
-	// 无论是否最终同意选票, 都会将自己term更新到更大
-	rf.setStatus(Follower)
-	rf.setTerm(req.ElectionTerm)
-	logterm, logindex := rf.getLogTermAndIndex()
-	// 判定竞选者日志是否新于自己
-	if logterm > req.LogTerm {
-		// 自己的日志大于竞选者的日志
-		rf.println(rf.me, "refuse", req.Me, "because of logs's term")
-		// TODO: 拒绝投票, 但同时已将自己term设置为了较大的term
-		reply.IsAgree = false
 
-		// 日志任期相同 继续比较index
-	} else if logterm == req.LogTerm {
-		// 如果自己的日志idx<=竞选着的idx, 任然同意该选票
-		reply.IsAgree = logindex <= req.LogIndex
-		if !reply.IsAgree {
-			rf.println(rf.me, "refuse", req.Me, "because of logs's index")
-		}
-	}
-	// logterm < req.LogTerm 自身最后的log term 小于候选者 也投统一票
-	if reply.IsAgree {
-		rf.println(rf.me, "agree", req.Me)
-		//赞同票后重置选举定时，避免竞争
-		rf.resetCandidateTimer()
-	}
-}
+/*************************************************************** core ****************************************************************************/
 
-// 候选人candidate 自身发起选举.
+// 候选人candidate 自身发起选举 [election timer timeout]
 func (rf *Raft) Vote() {
 	// 投票先增大自身任期, 保证&且每个任期只能发出一次投票
 	//i (因为每次发起选举都会自增任期, 所以每个任期最多投一票).
@@ -662,9 +626,10 @@ func (rf *Raft) Vote() {
 		}(i)
 	}
 	wait.Wait()
-	//如果集群中存在任期更大，则更新任期并转为follower
-	//TODO: 这时如果网络分区, 单个节点收不到leader的心跳, 每次接收心跳超时, 则将自己变为候选者 不停地自增++term发起选举
-	//这会导致该节点term高于集群中所有的节点, 这里为什么不校验投票的内容aggree(是否过半同意自己)? 直接就根据term放弃选举?
+	// 如果集群中存在任期更大，则更新任期并转为follower
+	// TODO: 这时如果网络分区, 单个节点收不到leader的心跳, 每次接收心跳超时, 则将自己变为候选者 不停地自增++term发起选举
+	// 这会导致该节点term高于集群中所有的节点, 这里为什么不校验投票的内容agree(是否过半同意自己)? 直接就根据term放弃选举?
+	// ANSWER: 因为网络分区了, candidate发出去的requestVote请求是会超时的...
 	//有一点, 这里不但放弃自己的选举流程&变为follower, 且同时将term提升为当前最大term, 在下一次/后续选举中, 因为之前的被分区的节点log肯定不是最新, 所以不会当选为leader.
 	//至于谁会当选为leader呢? 最终经过后续的选举轮次, 集群的term会逐步都提升为最大的term, 之后再通过比较log新旧来选出leader.
 	if curMaxterm > currentTerm {
@@ -678,92 +643,48 @@ func (rf *Raft) Vote() {
 	}
 }
 
-//发起选举定时器loop
-func (rf *Raft) ElectionLoop() {
-	//选举超时定时器
-	rf.resetCandidateTimer()
-	defer rf.eletionTimer.Stop()
 
-	for !rf.isKilled {
-		<-rf.eletionTimer.C
-		if rf.isKilled {
-			break
-		}
-		if rf.getStatus() == Candidate {
-			//如果状态为竞选者，则直接发启选举
-			rf.resetCandidateTimer()
-			rf.Vote()
-		} else if rf.getStatus() == Follower {
-			//如果状态为fallow，则转变为candidata并发动选举
-			rf.setStatus(Candidate)
-			rf.resetCandidateTimer()
-			rf.Vote()
-		}
-	}
-	rf.println(rf.me, "Exit ElectionLoop")
-}
-
-// 接收&处理 日志复制请求 [follower]
-func (rf *Raft) RequestAppendEntries(req *AppendEntries, resp *AppendEntriesResp) {
-	currentTerm, _ := rf.GetState()
-	resp.Term = currentTerm
-	resp.Successed = true
-	if req.Term < currentTerm {
-		//leader任期小于自身任期，则拒绝同步log
-		resp.Successed = false
+// 接收&处理 候选者发来的投票请求
+func (rf *Raft) RequestVote(req *RequestVoteArgs, reply *RequestVoteReply) {
+	reply.IsAgree = true
+	// 将自身当前的term放入回包中.
+	reply.CurrentTerm, _ = rf.GetState()
+	//竞选任期小于等于自身任期，则反对票(候选者发出选举之前一定会先自增term的)
+	if reply.CurrentTerm >= req.ElectionTerm {
+		rf.println(rf.me, "refuse", req.Me, "because of term")
+		reply.IsAgree = false
 		return
 	}
-	// 乱序日志，不处理
-	// 不处理旧的日志
-	if rf.isOldRequest(req) {
-		return
-	}
-	//否则更新自身任期，切换自生为follow(一般情况本来就是follower)，重置选举定时器(因为受到了新的心跳)
-	rf.resetCandidateTimer()
-	rf.setTerm(req.Term)
+	// 竞选任期大于自身任期，则更新自身任期，并转为follower
+	// 无论是否最终同意选票, 都会将自己term更新到更大
 	rf.setStatus(Follower)
-	//获取自身当前最新的日志index
-	_, logindex := rf.getLogTermAndIndex()
-	//判定与leader发送过来的prelog是否一致
-	if req.PrevLogIndex > 0 {
-		if req.PrevLogIndex > logindex {
-			//没有该日志，则拒绝更新(自身日志不连续)
-			// TODO: 不允许日志空洞
-			rf.println(rf.me, "can't find preindex", req.PrevLogTerm)
-			resp.Successed = false
-			resp.LastApplied = rf.lastApplied
-			return
-		}
-		if rf.getLogTermOfIndex(req.PrevLogIndex) != req.PrevLogTerm {
-			//该索引与自身日志不同，则拒绝更新(自身日志连续, 但该索引日志term与leader不同)
-			rf.println(rf.me, "term error", req.PrevLogTerm)
-			resp.Successed = false
-			resp.LastApplied = rf.lastApplied
-			return
+	rf.setTerm(req.ElectionTerm)
+	logterm, logindex := rf.getLogTermAndIndex()
+	// 判定竞选者日志是否新于自己
+	if logterm > req.LogTerm {
+		// 自己的日志大于竞选者的日志
+		rf.println(rf.me, "refuse", req.Me, "because of logs's term")
+		// TODO: 拒绝投票, 但同时已将自己term设置为了较大的term
+		reply.IsAgree = false
+
+		// 日志任期相同 继续比较index
+	} else if logterm == req.LogTerm {
+		// 如果自己的日志idx<=竞选着的idx, 任然同意该选票
+		reply.IsAgree = logindex <= req.LogIndex
+		if !reply.IsAgree {
+			rf.println(rf.me, "refuse", req.Me, "because of logs's index")
 		}
 	}
-
-	//更新日志/心跳
-	rf.setLastLog(req)
-	if len(req.Entries) > 0 || req.Snapshot.Index > 0 {
-		if len(req.Entries) > 0 {
-			rf.println(rf.me, "update log from ", req.Me, ":", req.Entries[0].Term, "-", req.Entries[0].Index, "to", req.Entries[len(req.Entries)-1].Term, "-", req.Entries[len(req.Entries)-1].Index)
-		}
-		rf.updateLog(req.PrevLogIndex, req.Entries, &req.Snapshot)
+	// logterm < req.LogTerm 自身最后的log term 小于候选者 也投统一票
+	if reply.IsAgree {
+		rf.println(rf.me, "agree", req.Me)
+		//赞同票后重置选举定时，避免竞争
+		rf.resetCandidateTimer()
 	}
-	// 更新follower的commitIndex为leader的.
-	// 也许上个周期leader commit的日志
-	rf.setCommitIndex(req.LeaderCommit)
-	// 尝试应用状态机.
-	// TODO: 注意raft中没有明确的apply rpc
-	// 而是leader先commit自己本地的日志, 然后立即触发心跳, 通过复制日志(心跳)来在下一次的交互中使得follower进行apply(如果条件为真)
-	// 即本次apply() 如果跟随者自己commit log有更新(从leader那里获知的), 则也会进行自己的apply
-	// follower当然也要执行apply, 否则怎么保证leader和follower的状态机都执行呢()
-	rf.apply()
-	rf.persist()
-
-	return
 }
+
+
+
 
 //复制日志给follower [leader]
 func (rf *Raft) replicateLogTo(peer int) bool {
@@ -817,6 +738,71 @@ func (rf *Raft) replicateLogTo(peer int) bool {
 	return replicateRst
 }
 
+// 接收&处理 日志复制请求 [follower]
+func (rf *Raft) RequestAppendEntries(req *AppendEntries, resp *AppendEntriesResp) {
+	currentTerm, _ := rf.GetState()
+	resp.Term = currentTerm
+	resp.Successed = true
+	if req.Term < currentTerm {
+		//leader任期小于自身任期，则拒绝同步log
+		resp.Successed = false
+		return
+	}
+	// 乱序日志，不处理
+	// 不处理旧的日志
+	if rf.isOldRequest(req) {
+		return
+	}
+	//否则更新自身任期，切换自生为follow(一般情况本来就是follower)，重置选举定时器(因为收到了新的心跳)
+	rf.resetCandidateTimer()
+	rf.setTerm(req.Term)
+	rf.setStatus(Follower)
+	//获取自身当前最新的日志index
+	_, logindex := rf.getLogTermAndIndex()
+	//判定与leader发送过来的prelog是否一致
+	if req.PrevLogIndex > 0 {
+		if req.PrevLogIndex > logindex {
+			//没有该日志，则拒绝更新(自身日志不连续)
+			// TODO: 不允许日志空洞
+			rf.println(rf.me, "can't find preindex", req.PrevLogTerm)
+			resp.Successed = false
+			resp.LastApplied = rf.lastApplied
+			return
+		}
+		if rf.getLogTermOfIndex(req.PrevLogIndex) != req.PrevLogTerm {
+			//该索引与自身日志不同，则拒绝更新(自身日志连续, 但该索引日志term与leader不同)
+			rf.println(rf.me, "term error", req.PrevLogTerm)
+			resp.Successed = false
+			resp.LastApplied = rf.lastApplied
+			return
+		}
+	}
+
+	//更新自身日志
+	rf.setLastLog(req)
+	if len(req.Entries) > 0 || req.Snapshot.Index > 0 {
+		if len(req.Entries) > 0 {
+			rf.println(rf.me, "update log from ", req.Me, ":", req.Entries[0].Term, "-", req.Entries[0].Index, "to", req.Entries[len(req.Entries)-1].Term, "-", req.Entries[len(req.Entries)-1].Index)
+		}
+		rf.updateLog(req.PrevLogIndex, req.Entries, &req.Snapshot)
+	}
+	// 更新follower的commitIndex为leader的.
+	// 也许上个周期leader commit的日志
+	rf.setCommitIndex(req.LeaderCommit)
+	// 尝试应用状态机.
+	// TODO: 注意raft中没有明确的apply rpc
+	// 而是leader先commit自己本地的日志, 然后立即触发心跳, 通过复制日志(心跳)来在下一次的交互中使得follower进行apply(如果条件为真)
+	// 即本次apply() 如果跟随者自己commit log有更新(从leader那里获知的), 则也会进行自己的apply
+	// follower当然也要执行apply, 否则怎么保证leader和follower的状态机都执行呢()
+	rf.apply()
+	rf.persist()
+
+	return
+}
+
+
+/*************************************************************** core ****************************************************************************/
+
 //立即复制日志
 func (rf *Raft) replicateLogNow() {
 	rf.lock("Raft.replicateLogNow")
@@ -825,6 +811,32 @@ func (rf *Raft) replicateLogNow() {
 		// 重置心跳超时即可
 		rf.heartbeatTimers[i].Reset(0)
 	}
+}
+
+
+//发起选举定时器loop
+func (rf *Raft) ElectionLoop() {
+	//选举超时定时器
+	rf.resetCandidateTimer()
+	defer rf.eletionTimer.Stop()
+
+	for !rf.isKilled {
+		<-rf.eletionTimer.C
+		if rf.isKilled {
+			break
+		}
+		if rf.getStatus() == Candidate {
+			//如果状态为竞选者，则直接发启选举
+			rf.resetCandidateTimer()
+			rf.Vote()
+		} else if rf.getStatus() == Follower {
+			//如果状态为fallow，则转变为candidata并发动选举
+			rf.setStatus(Candidate)
+			rf.resetCandidateTimer()
+			rf.Vote()
+		}
+	}
+	rf.println(rf.me, "Exit ElectionLoop")
 }
 
 //心跳周期&复制日志loop [leader]
